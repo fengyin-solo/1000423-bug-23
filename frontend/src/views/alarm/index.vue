@@ -19,9 +19,16 @@
     </div>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label class="filter-item">
+        <span>报警编号</span>
+        <input v-model="filters.keyword" placeholder="按报警编号检索" />
+      </label>
+      <label class="filter-item">
+        <span>状态</span>
+        <select v-model="filters.status">
+          <option value="">全部状态</option>
+          <option v-for="status in statuses" :key="status" :value="status">{{ status }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -31,15 +38,17 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>状态</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td>{{ String(row.status ?? '—') }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in allowedActions(String(row.status))"
               :key="action"
               class="link"
               type="button"
@@ -47,10 +56,11 @@
             >
               {{ action }}
             </button>
+            <span v-if="!allowedActions(String(row.status)).length" class="text-muted">—</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无报警中心数据，可先登记报警事件</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无符合条件的报警事件</td>
         </tr>
       </tbody>
     </table>
@@ -67,22 +77,37 @@ import { onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | boolean | null>
 
 const ENDPOINT = '/api/alarm'
-const columns = ["报警编号", "报警类型", "报警等级", "触发点位", "触发时间", "确认人员", "处置措施", "报警状态"]
-const actions = ["确认报警", "处置报警", "忽略报警"]
+// 「报警状态」是示例数据里的占位字段，真实状态统一以后端 status 为准，单独成列展示。
+const columns = ["报警编号", "报警类型", "报警等级", "触发点位", "触发时间", "确认人员", "处置措施"]
 const statuses = ["待确认", "已确认", "已处置", "已忽略"]
-const stats = [{"label": "今日报警", "value": 0}, {"label": "待确认报警", "value": 0}, {"label": "高等级报警", "value": 0}]
+// 状态流转口径与后端一致：
+// 待确认可确认/处置/忽略；已确认可处置/忽略；已处置、已忽略为终态，不再提供动作。
+const ACTIONS_BY_STATUS: Record<string, string[]> = {
+  "待确认": ["确认报警", "处置报警", "忽略报警"],
+  "已确认": ["处置报警", "忽略报警"],
+  "已处置": [],
+  "已忽略": [],
+}
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const filters = ref<{ keyword: string; status: string }>({ keyword: '', status: '' })
+const stats = ref([
+  { label: '今日报警', value: 0 },
+  { label: '待确认报警', value: 0 },
+  { label: '高等级报警', value: 0 },
+])
+
+function allowedActions(status: string): string[] {
+  return ACTIONS_BY_STATUS[status] ?? []
+}
 
 function resetFilters() {
-  filters.value = {}
+  filters.value = { keyword: '', status: '' }
   void reload()
 }
 
@@ -101,20 +126,45 @@ async function runAction(action: string, row: Row) {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('报警中心动作未生效，请稍后重试')
+    const payload = await response.json().catch(() => null) as { ok?: boolean; message?: string } | null
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.message || '报警中心动作未生效，请稍后重试')
     }
-    await reload()
+    await Promise.all([reload(), loadStats()])
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '报警中心操作失败'
   }
 }
 
+async function loadStats() {
+  try {
+    const response = await request(`${ENDPOINT}/stats`)
+    if (!response.ok) {
+      return
+    }
+    const payload = (await response.json()) as Record<string, number>
+    stats.value = [
+      { label: '今日报警', value: Number(payload.today ?? 0) },
+      { label: '待确认报警', value: Number(payload.unconfirmed ?? 0) },
+      { label: '高等级报警', value: Number(payload.high_level ?? 0) },
+    ]
+  } catch {
+    // 统计卡片读取失败不影响列表，保留上次数值即可。
+  }
+}
+
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = new URLSearchParams()
+  if (filters.value.keyword.trim()) {
+    query.set('keyword', filters.value.keyword.trim())
+  }
+  if (filters.value.status) {
+    query.set('status', filters.value.status)
+  }
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const suffix = query.toString()
+    const response = await request(suffix ? `${ENDPOINT}?${suffix}` : ENDPOINT)
     if (!response.ok) {
       throw new Error('报警事件列表读取失败')
     }
@@ -126,5 +176,8 @@ async function reload() {
   }
 }
 
-onMounted(reload)
+onMounted(() => {
+  void reload()
+  void loadStats()
+})
 </script>

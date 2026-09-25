@@ -511,7 +511,7 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
     "alarm": [{'id': 1,
   'status': '待确认',
   'pending': True,
-  'abnormal': False,
+  'abnormal': True,
   '报警编号': 'ALAR-0001',
   '报警类型': '报警中心样例1',
   '报警等级': '报警中心样例1',
