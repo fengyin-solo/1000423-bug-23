@@ -39,7 +39,7 @@
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in rowActions(row)"
               :key="action"
               class="link"
               type="button"
@@ -47,6 +47,7 @@
             >
               {{ action }}
             </button>
+            <span v-if="!rowActions(row).length" class="empty-state">已闭环</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -65,21 +66,39 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 
-import { request } from '@/api/client'
+import { fetchJson, request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type StatCard = { label: string; value: number }
+type ListPayload = { items?: Row[]; total?: number }
+type SummaryPayload = { cards?: StatCard[] }
+type ActionPayload = { ok: boolean; message?: string }
 
 const ENDPOINT = '/api/alarm'
 const columns = ["报警编号", "报警类型", "报警等级", "触发点位", "触发时间", "确认人员", "处置措施", "报警状态"]
-const actions = ["确认报警", "处置报警", "忽略报警"]
-const statuses = ["待确认", "已确认", "已处置", "已忽略"]
-const stats = [{"label": "今日报警", "value": 0}, {"label": "待确认报警", "value": 0}, {"label": "高等级报警", "value": 0}]
+// 各状态可执行的动作与后端口径一致：已处置、已忽略是终态，不能再确认或处置。
+const ROW_ACTIONS: Record<string, string[]> = {
+  待确认: ["确认报警", "处置报警", "忽略报警"],
+  已确认: ["处置报警", "忽略报警"],
+  已处置: [],
+  已忽略: [],
+}
+const DEFAULT_STATS: StatCard[] = [
+  { label: '今日报警', value: 0 },
+  { label: '待确认报警', value: 0 },
+  { label: '高等级报警', value: 0 },
+]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const stats = ref<StatCard[]>(DEFAULT_STATS.map((item) => ({ ...item })))
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+function rowActions(row: Row): string[] {
+  return ROW_ACTIONS[String(row.status ?? '')] ?? []
+}
 
 function resetFilters() {
   filters.value = {}
@@ -94,15 +113,27 @@ function openCreate() {
   errorMessage.value = '报警事件登记入口尚未接入审批流'
 }
 
+function buildQuery(): string {
+  const params = new URLSearchParams()
+  const keyword = (filters.value['报警编号'] ?? '').trim()
+  if (keyword) params.set('keyword', keyword)
+  const alarmType = (filters.value['报警类型'] ?? '').trim()
+  if (alarmType) params.set('报警类型', alarmType)
+  const level = (filters.value['报警等级'] ?? '').trim()
+  if (level) params.set('报警等级', level)
+  return params.toString()
+}
+
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('报警中心动作未生效，请稍后重试')
+    const payload = (await response.json().catch(() => null)) as ActionPayload | null
+    if (!response.ok || !payload?.ok) {
+      throw new Error(payload?.message || '报警中心动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
@@ -112,15 +143,14 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
-    if (!response.ok) {
-      throw new Error('报警事件列表读取失败')
-    }
-    const payload = await response.json()
-    rows.value = payload.items ?? []
-    total.value = payload.total ?? rows.value.length
+    const [listPayload, summaryPayload] = await Promise.all([
+      fetchJson<ListPayload>(`${ENDPOINT}?${buildQuery()}`),
+      fetchJson<SummaryPayload>(`${ENDPOINT}/summary`),
+    ])
+    rows.value = listPayload.items ?? []
+    total.value = listPayload.total ?? rows.value.length
+    stats.value = summaryPayload.cards ?? DEFAULT_STATS.map((item) => ({ ...item }))
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '报警中心列表读取失败'
   }

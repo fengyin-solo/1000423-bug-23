@@ -20,14 +20,31 @@ STATUSES = ["待确认", "已确认", "已处置", "已忽略"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按报警编号检索"),
     status: str | None = Query(default=None, description="待确认、已确认、已处置、已忽略"),
+    alarm_type: str | None = Query(default=None, alias="报警类型", description="按报警类型检索"),
+    level: str | None = Query(default=None, alias="报警等级", description="按报警等级检索"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按报警编号与状态过滤报警中心列表；没有数据时返回空页，不报错。"""
+    """按报警编号、类型、等级与状态过滤报警中心列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword, status=status, alarm_type=alarm_type, level=level, page=page, size=size
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/summary")
+def summary() -> dict[str, Any]:
+    """报警页统计卡片：今日报警、待确认报警、高等级报警，口径与列表、运营概览保持一致。"""
+    return {"module": "alarm", "cards": service.summary()}
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出报警中心清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "alarm", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +73,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出报警中心清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "alarm", "total": total, "items": items}
